@@ -3,6 +3,12 @@ import ApplicationServices
 import Carbon
 import Foundation
 
+// Accessibility messaging timeout for focus/input inspection (was 0.08s; WebKit apps can be slower).
+let axInspectionTimeout: Float = 0.3
+// Apps whose focus check is relaxed to "same app (bundle+pid) and same window": in-app focus moves
+// (input element changes, unreadable input/selection) do not skip or cancel. Window/app changes still do.
+let relaxedFocusBundleIDs: Set<String> = ["com.meta.endo"]
+
 struct FocusSnapshot {
     var bundleID: String
     var processID: pid_t = 0
@@ -12,17 +18,27 @@ struct FocusSnapshot {
     var inputToken = "input-1"
     var selectionStart = 0
     var selectionLength = 0
+    // false when the app does not expose its caret/selection over Accessibility.
+    // The target (app/window/input) is still compared; only the selection is unknown.
+    var selectionKnown = true
+    // true for relaxedFocusBundleIDs: only app and window are compared.
+    var relaxed = false
 
     func sameTarget(as other: FocusSnapshot) -> Bool {
         guard normalizeBundleID(bundleID) == normalizeBundleID(other.bundleID), processID == other.processID,
-              windowToken == other.windowToken, inputToken == other.inputToken else { return false }
+              windowToken == other.windowToken else { return false }
         if let window, let otherWindow = other.window, !CFEqual(window, otherWindow) { return false }
+        if relaxed && other.relaxed { return (window == nil) == (other.window == nil) }
+        guard relaxed == other.relaxed, inputToken == other.inputToken else { return false }
         if let input, let otherInput = other.input, !CFEqual(input, otherInput) { return false }
         return (window == nil) == (other.window == nil) && (input == nil) == (other.input == nil)
     }
 
     func sameSelection(as other: FocusSnapshot) -> Bool {
-        sameTarget(as: other) && selectionStart == other.selectionStart && selectionLength == other.selectionLength
+        if relaxed && other.relaxed { return sameTarget(as: other) }
+        guard sameTarget(as: other), selectionKnown == other.selectionKnown else { return false }
+        if !selectionKnown { return true }
+        return selectionStart == other.selectionStart && selectionLength == other.selectionLength
     }
 }
 
@@ -303,9 +319,17 @@ final class InputMonitor {
             return .failure(InputMonitorError(reason: "frontmost application unavailable"))
         }
         let app = AXUIElementCreateApplication(front.processIdentifier)
-        AXUIElementSetMessagingTimeout(app, 0.08)
+        AXUIElementSetMessagingTimeout(app, axInspectionTimeout)
         var windowValue: CFTypeRef?
         var inputValue: CFTypeRef?
+        if relaxedFocusBundleIDs.contains(normalizeBundleID(bundleID)) {
+            guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
+                  let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() else {
+                return .failure(InputMonitorError(reason: "cannot inspect window focus"))
+            }
+            return .success(FocusSnapshot(bundleID: bundleID, processID: front.processIdentifier,
+                window: (windowValue as! AXUIElement), input: nil, selectionKnown: false, relaxed: true))
+        }
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
               let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID(),
               AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &inputValue) == .success,
@@ -313,13 +337,16 @@ final class InputMonitor {
             return .failure(InputMonitorError(reason: "cannot inspect window/input focus"))
         }
         let input = inputValue as! AXUIElement
-        AXUIElementSetMessagingTimeout(input, 0.08)
+        AXUIElementSetMessagingTimeout(input, axInspectionTimeout)
         var rangeValue: CFTypeRef?
         var range = CFRange()
         guard AXUIElementCopyAttributeValue(input, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success,
               let rangeValue, CFGetTypeID(rangeValue) == AXValueGetTypeID(),
               AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) else {
-            return .failure(InputMonitorError(reason: "cannot inspect caret/selection"))
+            // Caret/selection is unreadable (e.g. some Electron apps): proceed with the selection
+            // marked unknown instead of skipping. Window/input focus checks above still apply.
+            return .success(FocusSnapshot(bundleID: bundleID, processID: front.processIdentifier,
+                window: (windowValue as! AXUIElement), input: input, selectionKnown: false))
         }
         guard validSelectionRange(location: range.location, length: range.length) else {
             return .failure(InputMonitorError(reason: "invalid caret/selection range"))
@@ -346,7 +373,7 @@ final class InputMonitor {
             }
         }, &observer) == .success, let observer else { return false }
         let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.08)
+        AXUIElementSetMessagingTimeout(app, axInspectionTimeout)
         let context = Unmanaged.passUnretained(self).toOpaque()
         for notification in [kAXFocusedWindowChangedNotification, kAXFocusedUIElementChangedNotification] {
             guard AXObserverAddNotification(observer, app, notification as CFString, context) == .success else { return false }
