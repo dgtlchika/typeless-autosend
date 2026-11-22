@@ -2,6 +2,8 @@
 
 A macOS command-line utility and login service for Apple Silicon (ARM). After Typeless finishes a transcription, it waits before pressing Return in an application you explicitly enabled. Any user keystroke or change of input focus cancels the pending send.
 
+日本語の説明（このフォークについて）: [README.ja.md](README.ja.md)
+
 ## Install from a Release (recommended)
 
 Requires **macOS 15 or later on Apple Silicon (ARM64)**, with Typeless installed, signed in, and history enabled. Swift, Xcode, Node.js and npm are not needed.
