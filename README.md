@@ -1,3 +1,5 @@
+> このフォークについて：デジタル地下室（note: sumaho_lab）が自前環境で使うためのフォークです。上流は llj15/typeless-autosend（https://github.com/llj15/typeless-autosend）です。
+
 # Typeless AutoSend
 
 A macOS command-line utility and login service for Apple Silicon (ARM). After Typeless finishes a transcription, it waits before pressing Return in an application you explicitly enabled. Any user keystroke or change of input focus cancels the pending send.
